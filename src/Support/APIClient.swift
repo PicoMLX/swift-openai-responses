@@ -14,7 +14,7 @@ public struct APIClient: Sendable {
 	}
 
 	private let request: URLRequest
-	private let eventSource = EventSource(mode: .dataOnly)
+    private let eventSource: EventSource
 	private let encoder = tap(JSONEncoder()) { $0.dateEncodingStrategy = .iso8601 }
 	private let decoder = tap(JSONDecoder()) { $0.dateDecodingStrategy = .iso8601 }
 
@@ -30,6 +30,7 @@ public struct APIClient: Sendable {
 		}
 
 		self.request = request
+        self.eventSource = EventSource(request: request)
 	}
 
 	/// Creates a new `ResponsesAPI` instance using OpenAI API credentials.
@@ -45,6 +46,7 @@ public struct APIClient: Sendable {
 		if let organizationId { request.addValue(organizationId, forHTTPHeaderField: "OpenAI-Organization") }
 
 		self.request = request
+        self.eventSource = EventSource(request: request)
 	}
 
 	func send<R: Decodable>(expecting _: R.Type, configuring requestBuilder: (inout URLRequest, JSONEncoder) throws -> Void) async throws -> R {
@@ -86,17 +88,42 @@ public struct APIClient: Sendable {
 
 		let task = Task {
 			defer { continuation.finish() }
+            
+            do {
+                let (stream, _) = try await URLSession.shared.bytes(for: request)
+                
+                // Iterate through events as they arrive
+                for try await event in stream.events {
+                    
+                    #if DEBUG
+                    switch event.event {
+                    case "update":
+                        print("Update: \(event.data)")
+                    case "error":
+                        print("Error: \(event.data)")
+                    default:
+                        print("Received: \(event.data)")
+                    }
+                    #endif
+                    
+                    guard case let data = event.data.data(using: .utf8) else { continue }
+                    continuation.yield(with: Result { try decoder.decode(T.self, from: data ?? Data()) })
+                    
+                }
+            } catch {
+                print(error.localizedDescription)
+            }
 
-			let dataTask = eventSource.dataTask(for: request)
-			defer { dataTask.cancel(urlSession: URLSession.shared) }
-
-			for await event in dataTask.events() {
-				guard case let .event(event) = event, let data = event.data?.data(using: .utf8) else { continue }
-
-				continuation.yield(with: Result { try decoder.decode(T.self, from: data) })
-
-				try Task.checkCancellation()
-			}
+//			let dataTask = eventSource.dataTask(for: request)
+//			defer { dataTask.cancel(urlSession: URLSession.shared) }
+//
+//			for await event in dataTask.events() {
+//				guard case let .event(event) = event, let data = event.data?.data(using: .utf8) else { continue }
+//
+//				continuation.yield(with: Result { try decoder.decode(T.self, from: data) })
+//
+//				try Task.checkCancellation()
+//			}
 		}
 
 		continuation.onTermination = { _ in
